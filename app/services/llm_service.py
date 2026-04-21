@@ -48,6 +48,27 @@ class LLMService:
         response = self.llm.invoke(messages)
         return response.content
 
+    async def acheck_context_sufficiency(self, query: str, context: str) -> str:
+        from langchain_core.messages import HumanMessage, SystemMessage
+
+        messages = [
+            SystemMessage(
+                content=(
+                    "คุณเป็นผู้ช่วยวิเคราะห์กฎหมาย ให้ตอบคำเดียวว่า SUFFICIENT "
+                    "หรือขึ้นต้นด้วย NEEDS_CLARIFICATION: ตามด้วยสิ่งที่ต้องถามเพิ่ม"
+                )
+            ),
+            HumanMessage(
+                content=(
+                    f"[ข้อมูลอ้างอิง]\n{context}\n\n"
+                    f"คำถาม: {query}\n"
+                    "วิเคราะห์ว่าข้อมูลพอหรือยัง"
+                )
+            ),
+        ]
+        response = await self.llm.ainvoke(messages)
+        return response.content
+
     def generate_answer(self, query: str, context: str) -> str:
         from langchain_core.messages import HumanMessage, SystemMessage
 
@@ -56,5 +77,16 @@ class LLMService:
             HumanMessage(content=f"[ข้อมูลอ้างอิง]\n{context}\n\nคำถาม: {query}"),
         ]
         response = self.llm.invoke(messages)
+        return response.content
+
+    async def agenerate_answer(self, query: str, context: str) -> str:
+        from langchain_core.messages import HumanMessage, SystemMessage
+
+        messages = [
+            SystemMessage(content=self.get_system_prompt()),
+            HumanMessage(content=f"[ข้อมูลอ้างอิง]\n{context}\n\nคำถาม: {query}"),
+        ]
+        # ainvoke allows streaming of on_chat_model_stream events
+        response = await self.llm.ainvoke(messages)
         return response.content
 

@@ -29,12 +29,26 @@ class EmbeddingService:
             embedding_function=self.embedding_fn,
         )
 
-    def initialize_collection(self, documents: list[str]) -> None:
-        if self.collection.count() > 0:
+    def reset_collection(self) -> None:
+        self.client.delete_collection(name=settings.COLLECTION_NAME)
+        self.collection = self.client.get_or_create_collection(
+            name=settings.COLLECTION_NAME,
+            embedding_function=self.embedding_fn,
+        )
+
+    def initialize_collection(self, documents: list[dict], force: bool = False) -> None:
+        if force:
+            self.reset_collection()
+        elif self.collection.count() > 0:
             return
 
+        if not documents:
+            return
+
+        texts = [doc["text"] for doc in documents]
+        metadatas = [doc.get("metadata", {}) for doc in documents]
         ids = [f"doc_{index}" for index in range(len(documents))]
-        self.collection.add(documents=documents, ids=ids)
+        self.collection.add(documents=texts, metadatas=metadatas, ids=ids)
 
     def search(self, query: str, n_results: int = 3) -> list[str]:
         results = self.collection.query(query_texts=[query], n_results=n_results)

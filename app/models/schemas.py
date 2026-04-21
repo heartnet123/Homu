@@ -13,4 +13,6 @@ class LegalQueryResponse(BaseModel):
     sources: List[str]
     analysis: Optional[str] = None
     confidence: Optional[str] = "high"
+    thread_id: Optional[str] = None
+    needs_clarification: Optional[bool] = False
 

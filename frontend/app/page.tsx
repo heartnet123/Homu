@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState, useRef, useEffect } from 'react';
+import Link from 'next/link';
 
 const MODELS = [
   { id: 'gpt-4', name: 'GPT-4', company: 'OpenAI', color: 'bg-blue-500', bgColor: 'bg-blue-50', textColor: 'text-blue-700', borderColor: 'border-blue-100' },
@@ -14,9 +15,48 @@ export default function Home() {
   const [isDropdownOpen, setIsDropdownOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
   
-  const [messages, setMessages] = useState<{role: string, content: string, sources?: string[]}[]>([]);
+  const [messages, setMessages] = useState<{role: string, content: string, sources?: string[], isError?: boolean, isRetryable?: boolean, originalQuery?: string, needsClarification?: boolean}[]>([]);
   const [query, setQuery] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+  
+  const [currentThreadId, setCurrentThreadId] = useState<string | null>(null);
+  const [recentThreads, setRecentThreads] = useState<any[]>([]);
+
+  const fetchThreads = async () => {
+    try {
+      const res = await fetch("http://localhost:8000/api/v1/threads");
+      if (res.ok) {
+        const data = await res.json();
+        setRecentThreads(data);
+      }
+    } catch (e) {
+      console.error("Failed to fetch threads", e);
+    }
+  };
+
+  const loadThread = async (id: string) => {
+    try {
+      const res = await fetch(`http://localhost:8000/api/v1/threads/${id}`);
+      if (res.ok) {
+        const data = await res.json();
+        const mappedMessages = data.map((m: any) => ({
+          role: m.role,
+          content: m.content,
+          sources: m.sources,
+          needsClarification: m.needs_clarification
+        }));
+        setMessages(mappedMessages);
+        setCurrentThreadId(id);
+        if (window.innerWidth < 768) setIsDropdownOpen(false); // Close sidebar on mobile if it existed
+      }
+    } catch (e) {
+      console.error("Failed to load thread", e);
+    }
+  };
+
+  useEffect(() => {
+    fetchThreads();
+  }, []);
 
   useEffect(() => {
     function handleClickOutside(event: MouseEvent) {
@@ -28,25 +68,109 @@ export default function Home() {
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, []);
 
-  const handleSubmit = async () => {
-    if (!query.trim() || isLoading) return;
+  const handleSubmit = async (retryQuery?: string | React.MouseEvent | React.KeyboardEvent) => {
+    const queryToSend = typeof retryQuery === "string" ? retryQuery : query;
+    if (!queryToSend.trim() || isLoading) return;
 
-    const newQuery = query;
-    setQuery("");
-    setMessages((prev) => [...prev, { role: "user", content: newQuery }]);
+    if (typeof retryQuery !== "string") {
+      setQuery("");
+      setMessages((prev) => [...prev, { role: "user", content: queryToSend }]);
+    } else {
+      setMessages((prev) => prev.filter(msg => !msg.isError));
+    }
+
     setIsLoading(true);
 
     try {
-      const res = await fetch("http://localhost:8000/api/v1/ask", {
+      const res = await fetch("http://localhost:8000/api/v1/ask/stream", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query: newQuery })
+        headers: { "Content-Type": "application/json", "Accept": "text/event-stream" },
+        body: JSON.stringify({ query: queryToSend, thread_id: currentThreadId || undefined })
       });
-      const data = await res.json();
-      setMessages((prev) => [...prev, { role: "ai", content: data.answer, sources: data.sources }]);
+      
+      if (!res.ok) {
+        throw new Error(`HTTP error! status: ${res.status}`);
+      }
+
+      setMessages((prev) => [...prev, { role: "ai", content: "" }]);
+
+      const reader = res.body?.getReader();
+      if (!reader) throw new Error("No readable stream");
+
+      const decoder = new TextDecoder("utf-8");
+      let done = false;
+      let buffer = "";
+
+      while (!done) {
+        const { value, done: readerDone } = await reader.read();
+        done = readerDone;
+        if (value) {
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          
+          buffer = lines.pop() || "";
+          
+          for (const line of lines) {
+            if (line.startsWith('data: ')) {
+              const dataStr = line.replace('data: ', '').trim();
+              if (!dataStr) continue;
+              try {
+                const parsed = JSON.parse(dataStr);
+                if (parsed.type === 'token') {
+                  setMessages((prev) => {
+                    const newMessages = [...prev];
+                    const lastMsg = newMessages[newMessages.length - 1];
+                    if (lastMsg && lastMsg.role === 'ai') {
+                      lastMsg.content += parsed.content;
+                    }
+                    return newMessages;
+                  });
+                } else if (parsed.type === 'metadata') {
+                  if (parsed.thread_id && parsed.thread_id !== currentThreadId) {
+                    setCurrentThreadId(parsed.thread_id);
+                    fetchThreads();
+                  }
+                  setMessages((prev) => {
+                    const newMessages = [...prev];
+                    const lastMsg = newMessages[newMessages.length - 1];
+                    if (lastMsg && lastMsg.role === 'ai') {
+                      lastMsg.sources = parsed.sources;
+                      lastMsg.needsClarification = parsed.needs_clarification;
+                      if (parsed.needs_clarification && !lastMsg.content) {
+                          lastMsg.content = "กรุณาให้ข้อมูลเพิ่มเติมเพื่อให้เราช่วยเหลือได้อย่างถูกต้อง";
+                      }
+                      if (!lastMsg.content && !parsed.needs_clarification) {
+                          lastMsg.content = "ไม่พบคำตอบสำหรับคำถามของคุณ กรุณาลองใช้คำถามที่แตกต่างออกไป";
+                      }
+                    }
+                    return newMessages;
+                  });
+                } else if (parsed.type === 'error') {
+                   setMessages((prev) => {
+                    const newMessages = [...prev];
+                    const lastMsg = newMessages[newMessages.length - 1];
+                    if (lastMsg && lastMsg.role === 'ai') {
+                      lastMsg.content += "\n[ข้อผิดพลาด: " + parsed.content + "]";
+                    }
+                    return newMessages;
+                  });
+                }
+              } catch (e) {
+                console.error("Failed to parse SSE JSON", e, dataStr);
+              }
+            }
+          }
+        }
+      }
     } catch (error) {
       console.error(error);
-      setMessages((prev) => [...prev, { role: "ai", content: "Error connecting to server." }]);
+      setMessages((prev) => [...prev, { 
+        role: "ai", 
+        content: "เกิดข้อผิดพลาดในการเชื่อมต่อ กรุณาลองใหม่อีกครั้ง",
+        isError: true,
+        isRetryable: true,
+        originalQuery: queryToSend
+      }]);
     } finally {
       setIsLoading(false);
     }
@@ -56,7 +180,11 @@ export default function Home() {
       {/* Sidebar Redux */}
       <div className="hidden md:flex w-64 flex-col border-r border-[var(--border-color)] bg-[var(--bg-secondary)] flex-shrink-0">
         <div className="p-4 border-b border-[var(--border-color)]">
-          <button className="w-full flex items-center justify-between gap-2 border border-[var(--border-color)] bg-[var(--bg-primary)] hover:bg-gray-50 rounded-lg p-2.5 text-sm font-medium transition-colors shadow-sm text-[var(--text-main)]">
+          <div className="flex items-center gap-2 mb-4 px-1">
+            <div className="w-8 h-8 rounded-lg bg-blue-600 flex items-center justify-center text-white font-bold tracking-wider">H</div>
+            <h1 className="text-lg font-bold text-[var(--text-main)] tracking-tight">Homu</h1>
+          </div>
+          <button onClick={() => { setMessages([]); setQuery(""); setCurrentThreadId(null); }} className="w-full flex items-center justify-between gap-2 border border-[var(--border-color)] bg-[var(--bg-primary)] hover:bg-gray-50 rounded-lg p-2.5 text-sm font-medium transition-colors shadow-sm text-[var(--text-main)]">
             <div className="flex items-center gap-2">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
@@ -70,19 +198,32 @@ export default function Home() {
               <line x1="5" y1="12" x2="19" y2="12"></line>
             </svg>
           </button>
+          <Link href="/documents" className="mt-2 w-full flex items-center gap-2 border border-transparent hover:border-[var(--border-color)] hover:bg-gray-50 rounded-lg p-2.5 text-sm font-medium transition-colors text-[var(--text-main)]">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+              <polyline points="14 2 14 8 20 8"></polyline>
+              <line x1="16" y1="13" x2="8" y2="13"></line>
+              <line x1="16" y1="17" x2="8" y2="17"></line>
+              <polyline points="10 9 9 9 8 9"></polyline>
+            </svg>
+            <span>Documents</span>
+          </Link>
         </div>
         <div className="flex-1 overflow-y-auto p-3 space-y-1">
           {/* Past Chats */}
           <div className="text-xs font-semibold text-[var(--text-muted)] mb-3 mt-2 px-3 uppercase tracking-wider">Recent</div>
-          <button className="w-full text-left truncate text-sm px-3 py-2.5 rounded-lg bg-gray-100/60 text-[var(--text-main)] font-medium">
-            Clean Minimalism UI
-          </button>
-          <button className="w-full text-left truncate text-sm px-3 py-2.5 rounded-lg hover:bg-gray-100/50 text-[var(--text-muted)] transition-colors">
-            React Server Components
-          </button>
-          <button className="w-full text-left truncate text-sm px-3 py-2.5 rounded-lg hover:bg-gray-100/50 text-[var(--text-muted)] transition-colors">
-            PostgreSQL Schema Design
-          </button>
+          {recentThreads.map(thread => (
+            <button 
+              key={thread.id} 
+              onClick={() => loadThread(thread.id)} 
+              className={`w-full text-left truncate text-sm px-3 py-2.5 rounded-lg transition-colors ${currentThreadId === thread.id ? 'bg-gray-100/60 text-[var(--text-main)] font-medium' : 'hover:bg-gray-100/50 text-[var(--text-muted)]'}`}
+            >
+              {thread.title}
+            </button>
+          ))}
+          {recentThreads.length === 0 && (
+            <div className="px-3 text-xs text-[var(--text-muted)]">No recent chats</div>
+          )}
         </div>
         <div className="p-4 border-t border-[var(--border-color)]">
           <button className="flex items-center gap-3 w-full p-2 hover:bg-gray-100/50 rounded-lg transition-colors text-sm font-medium text-[var(--text-main)]">
@@ -156,13 +297,14 @@ export default function Home() {
             </div>
           </div>
           <div className="flex items-center gap-2">
-            <button className="p-2 text-[var(--text-muted)] hover:text-[var(--text-main)] rounded-lg hover:bg-gray-50 transition-colors border border-transparent hover:border-[var(--border-color)]">
+            <Link href="/settings" className="p-2 text-[var(--text-muted)] hover:text-[var(--text-main)] rounded-lg hover:bg-gray-50 transition-colors border border-transparent hover:border-[var(--border-color)]">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <circle cx="12" cy="12" r="3"></circle>
                 <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
               </svg>
-            </button>
+            </Link>
           </div>
+
         </div>
         
         {/* Badges directly underneath top header */}
@@ -178,7 +320,7 @@ export default function Home() {
           <div className="max-w-3xl mx-auto flex flex-col gap-10 p-4 sm:p-6 w-full pt-8">
             {messages.length === 0 ? (
               <div className="text-center text-[var(--text-muted)] p-10 mt-10">
-                <h3 className="text-xl mb-2 font-semibold">Thai Legal RAG</h3>
+                <h3 className="text-xl mb-2 font-semibold">Homu — ที่ปรึกษากฎหมายไทย</h3>
                 <p>Start a conversation to query legal documents.</p>
               </div>
             ) : (
@@ -203,15 +345,62 @@ export default function Home() {
                     <div className="text-[var(--text-main)] text-base leading-relaxed whitespace-pre-wrap">
                       {msg.content}
                     </div>
-                    {msg.sources && msg.sources.length > 0 && (
-                      <div className="mt-3 text-xs text-gray-500 bg-gray-50 p-3 rounded-lg border border-gray-200 shadow-sm">
-                        <span className="font-semibold block mb-1">Sources:</span>
-                        <ul className="list-disc pl-5 space-y-1">
-                          {msg.sources.map((src, idx) => (
-                            <li key={idx} className="break-all">{src}</li>
-                          ))}
-                        </ul>
+                    {msg.needsClarification && (
+                      <div className="mt-3 inline-flex items-center gap-2 px-3 py-2 rounded-lg bg-orange-50 text-orange-700 text-sm font-medium border border-orange-100">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"></circle><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
+                        ต้องการข้อมูลเพิ่มเติม
                       </div>
+                    )}
+                    {msg.isError && msg.isRetryable && (
+                      <button 
+                        onClick={() => handleSubmit(msg.originalQuery)}
+                        className="mt-3 inline-flex items-center gap-2 px-3 py-2 rounded-lg bg-red-50 text-red-700 text-sm font-medium hover:bg-red-100 transition-colors border border-red-100"
+                      >
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"></path><path d="M3 3v5h5"></path></svg>
+                        ลองใหม่อีกครั้ง
+                      </button>
+                    )}
+                    {msg.sources && msg.sources.length > 0 && (
+                      <details className="mt-4 bg-gray-50/50 rounded-xl border border-gray-200/80 overflow-hidden group">
+                        <summary className="px-4 py-3 text-sm font-semibold text-gray-700 cursor-pointer hover:bg-gray-50 flex items-center justify-between list-none [&::-webkit-details-marker]:hidden transition-colors">
+                          <span className="flex items-center gap-2.5">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="text-gray-400"><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20"></path></svg>
+                            Sources ({msg.sources.length})
+                          </span>
+                          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="transition-transform duration-200 group-open:rotate-180 text-gray-400"><polyline points="6 9 12 15 18 9"></polyline></svg>
+                        </summary>
+                        <div className="px-4 pb-4 pt-1 space-y-3">
+                          {msg.sources.map((src, idx) => {
+                            let remaining = src.trim();
+                            const tags = [];
+                            while (remaining.startsWith('[')) {
+                              const endIdx = remaining.indexOf(']');
+                              if (endIdx !== -1) {
+                                tags.push(remaining.substring(1, endIdx).trim());
+                                remaining = remaining.substring(endIdx + 1).trim();
+                              } else {
+                                break;
+                              }
+                            }
+                            return (
+                              <div key={idx} className="bg-white p-3.5 rounded-lg border border-gray-200 shadow-sm">
+                                {tags.length > 0 && (
+                                  <div className="flex flex-wrap gap-2 mb-2">
+                                    {tags.map((tag, tIdx) => (
+                                      <span key={tIdx} className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-semibold bg-gray-100 text-gray-600 border border-gray-200 uppercase tracking-wider">
+                                        {tag}
+                                      </span>
+                                    ))}
+                                  </div>
+                                )}
+                                <div className="text-[13px] text-gray-700 leading-relaxed whitespace-pre-wrap">
+                                  {remaining || src}
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </details>
                     )}
                   </div>
                 </div>

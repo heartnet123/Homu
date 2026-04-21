@@ -5,7 +5,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     # Paths
-    DOC_PATH: str = "data/พรบ.เเรงงาน.docx"
+    DOC_PATH: str = "data/"
     CHROMA_DB_DIR: str = "./chroma_database"
     COLLECTION_NAME: str = "thai_labor_law"
 
@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     @property
     def resolved_doc_path(self) -> Path:
         configured_path = Path(self.DOC_PATH)
-        fallback_path = Path("พรบ.เเรงงาน.docx")
+        fallback_path = Path("data")
 
         if configured_path.exists():
             return configured_path
