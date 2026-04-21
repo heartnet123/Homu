@@ -3,18 +3,38 @@
 import React, { useState, useRef, useEffect } from 'react';
 import Link from 'next/link';
 
-const MODELS = [
-  { id: 'gpt-4', name: 'GPT-4', company: 'OpenAI', color: 'bg-blue-500', bgColor: 'bg-blue-50', textColor: 'text-blue-700', borderColor: 'border-blue-100' },
-  { id: 'gpt-3.5-turbo', name: 'GPT-3.5', company: 'OpenAI', color: 'bg-emerald-500', bgColor: 'bg-emerald-50', textColor: 'text-emerald-700', borderColor: 'border-emerald-100' },
-  { id: 'claude-3-opus', name: 'Claude 3 Opus', company: 'Anthropic', color: 'bg-purple-500', bgColor: 'bg-purple-50', textColor: 'text-purple-700', borderColor: 'border-purple-100' },
-  { id: 'gemini-1.5-pro', name: 'Gemini 1.5 Pro', company: 'Google', color: 'bg-orange-500', bgColor: 'bg-orange-50', textColor: 'text-orange-700', borderColor: 'border-orange-100' }
+const ALL_MODELS = [
+  { id: 'gpt-5.4', name: 'GPT-5.4', company: 'OpenAI', color: 'bg-emerald-600', bgColor: 'bg-emerald-50', textColor: 'text-emerald-800', borderColor: 'border-emerald-200' },
+  { id: 'gpt-5.4-mini', name: 'GPT-5.4 Mini', company: 'OpenAI', color: 'bg-emerald-400', bgColor: 'bg-emerald-50', textColor: 'text-emerald-600', borderColor: 'border-emerald-100' },
+  { id: 'gpt-4o', name: 'GPT-4o', company: 'OpenAI', color: 'bg-emerald-500', bgColor: 'bg-emerald-50', textColor: 'text-emerald-700', borderColor: 'border-emerald-100' },
+  { id: 'gpt-4-turbo', name: 'GPT-4 Turbo', company: 'OpenAI', color: 'bg-emerald-500', bgColor: 'bg-emerald-50', textColor: 'text-emerald-700', borderColor: 'border-emerald-100' },
+  { id: 'gpt-3.5-turbo', name: 'GPT-3.5 Turbo', company: 'OpenAI', color: 'bg-emerald-500', bgColor: 'bg-emerald-50', textColor: 'text-emerald-700', borderColor: 'border-emerald-100' },
+  { id: 'claude-3-opus-20240229', name: 'Claude 3 Opus', company: 'Anthropic', color: 'bg-purple-500', bgColor: 'bg-purple-50', textColor: 'text-purple-700', borderColor: 'border-purple-100' },
+  { id: 'claude-3-sonnet-20240229', name: 'Claude 3 Sonnet', company: 'Anthropic', color: 'bg-purple-500', bgColor: 'bg-purple-50', textColor: 'text-purple-700', borderColor: 'border-purple-100' },
+  { id: 'claude-3-haiku-20240307', name: 'Claude 3 Haiku', company: 'Anthropic', color: 'bg-purple-500', bgColor: 'bg-purple-50', textColor: 'text-purple-700', borderColor: 'border-purple-100' },
+  { id: 'gemini-1.5-pro', name: 'Gemini 1.5 Pro', company: 'Google', color: 'bg-blue-500', bgColor: 'bg-blue-50', textColor: 'text-blue-700', borderColor: 'border-blue-100' },
+  { id: 'gemini-1.5-flash', name: 'Gemini 1.5 Flash', company: 'Google', color: 'bg-blue-500', bgColor: 'bg-blue-50', textColor: 'text-blue-700', borderColor: 'border-blue-100' }
 ];
 
 export default function Home() {
-  const [selectedModel, setSelectedModel] = useState(MODELS[0]);
+  const [selectedModel, setSelectedModel] = useState(ALL_MODELS[0]);
   const [isDropdownOpen, setIsDropdownOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
-  
+
+  const loadSettings = () => {
+    const savedDefault = localStorage.getItem('defaultModel');
+    if (savedDefault) {
+      const model = ALL_MODELS.find(m => m.id === savedDefault);
+      if (model) setSelectedModel(model);
+    }
+  };
+
+  useEffect(() => {
+    loadSettings();
+    window.addEventListener('settingsUpdated', loadSettings);
+    return () => window.removeEventListener('settingsUpdated', loadSettings);
+  }, []);
+
   const [messages, setMessages] = useState<{role: string, content: string, sources?: string[], isError?: boolean, isRetryable?: boolean, originalQuery?: string, needsClarification?: boolean}[]>([]);
   const [query, setQuery] = useState("");
   const [isLoading, setIsLoading] = useState(false);
@@ -85,7 +105,7 @@ export default function Home() {
       const res = await fetch("http://localhost:8000/api/v1/ask/stream", {
         method: "POST",
         headers: { "Content-Type": "application/json", "Accept": "text/event-stream" },
-        body: JSON.stringify({ query: queryToSend, thread_id: currentThreadId || undefined })
+        body: JSON.stringify({ query: queryToSend, thread_id: currentThreadId || undefined, model: selectedModel.id })
       });
       
       if (!res.ok) {
@@ -264,7 +284,7 @@ export default function Home() {
                     Select Model
                   </div>
                   <div className="max-h-[60vh] overflow-y-auto">
-                    {MODELS.map((model) => (
+                    {ALL_MODELS.map((model) => (
                       <button
                         key={model.id}
                         onClick={() => {
@@ -307,13 +327,6 @@ export default function Home() {
 
         </div>
         
-        {/* Badges directly underneath top header */}
-        <div className="bg-[var(--bg-primary)] px-4 sm:px-6 py-2 border-b border-[var(--border-color)] shadow-sm flex items-center justify-center z-10 shrink-0">
-          <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-semibold rounded-md border shadow-sm ${selectedModel.bgColor} ${selectedModel.textColor} ${selectedModel.borderColor}`}>
-            <span className={`w-1.5 h-1.5 rounded-full ${selectedModel.color}`}></span>
-            {selectedModel.name} Active
-          </span>
-        </div>
 
         {/* Chat Messages */}
         <div className="flex-1 overflow-y-auto pb-[180px]">

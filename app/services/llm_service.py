@@ -18,18 +18,29 @@ class LLMService:
     def __init__(self):
         from langchain_openai import ChatOpenAI
 
-        self.llm = ChatOpenAI(
-            model=settings.LLM_MODEL_NAME,
-            api_key=settings.OPENAI_API_KEY,
-            temperature=0.0,
-        )
+        self.default_model = settings.LLM_MODEL_NAME
+        self.api_key = settings.OPENAI_API_KEY
+        self._llm_cache = {}
+
+    def _get_llm(self, model_name: str = None):
+        from langchain_openai import ChatOpenAI
+        
+        target_model = model_name or self.default_model
+        if target_model not in self._llm_cache:
+            self._llm_cache[target_model] = ChatOpenAI(
+                model=target_model,
+                api_key=self.api_key,
+                temperature=0.0,
+            )
+        return self._llm_cache[target_model]
 
     def get_system_prompt(self) -> str:
         return STRICT_LEGAL_SYSTEM_PROMPT
 
-    def check_context_sufficiency(self, query: str, context: str) -> str:
+    def check_context_sufficiency(self, query: str, context: str, model_name: str = None) -> str:
         from langchain_core.messages import HumanMessage, SystemMessage
 
+        llm = self._get_llm(model_name)
         messages = [
             SystemMessage(
                 content=(
@@ -45,12 +56,13 @@ class LLMService:
                 )
             ),
         ]
-        response = self.llm.invoke(messages)
+        response = llm.invoke(messages)
         return response.content
 
-    async def acheck_context_sufficiency(self, query: str, context: str) -> str:
+    async def acheck_context_sufficiency(self, query: str, context: str, model_name: str = None) -> str:
         from langchain_core.messages import HumanMessage, SystemMessage
 
+        llm = self._get_llm(model_name)
         messages = [
             SystemMessage(
                 content=(
@@ -66,27 +78,29 @@ class LLMService:
                 )
             ),
         ]
-        response = await self.llm.ainvoke(messages)
+        response = await llm.ainvoke(messages)
         return response.content
 
-    def generate_answer(self, query: str, context: str) -> str:
+    def generate_answer(self, query: str, context: str, model_name: str = None) -> str:
         from langchain_core.messages import HumanMessage, SystemMessage
 
+        llm = self._get_llm(model_name)
         messages = [
             SystemMessage(content=self.get_system_prompt()),
             HumanMessage(content=f"[ข้อมูลอ้างอิง]\n{context}\n\nคำถาม: {query}"),
         ]
-        response = self.llm.invoke(messages)
+        response = llm.invoke(messages)
         return response.content
 
-    async def agenerate_answer(self, query: str, context: str) -> str:
+    async def agenerate_answer(self, query: str, context: str, model_name: str = None) -> str:
         from langchain_core.messages import HumanMessage, SystemMessage
 
+        llm = self._get_llm(model_name)
         messages = [
             SystemMessage(content=self.get_system_prompt()),
             HumanMessage(content=f"[ข้อมูลอ้างอิง]\n{context}\n\nคำถาม: {query}"),
         ]
         # ainvoke allows streaming of on_chat_model_stream events
-        response = await self.llm.ainvoke(messages)
+        response = await llm.ainvoke(messages)
         return response.content
 

@@ -13,6 +13,15 @@ class ThaiLegalEmbeddingFunction:
         embeddings = self.model.encode(input, show_progress_bar=False)
         return embeddings.tolist()
 
+    def embed_documents(self, documents: list[str]) -> list[list[float]]:
+        return self.__call__(documents)
+
+    def embed_query(self, query: str = None, **kwargs) -> list[float]:
+        text = query or kwargs.get("input") or kwargs.get("text")
+        if text is None:
+            raise ValueError("No text provided for embedding")
+        return self.__call__([text])[0]
+
     @staticmethod
     def name() -> str:
         return "default"

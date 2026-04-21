@@ -13,6 +13,8 @@ export default function DocumentsPage() {
   const [documents, setDocuments] = useState<DocumentFile[]>([]);
   const [isUploading, setIsUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
+  const [uploadingFiles, setUploadingFiles] = useState<string[]>([]);
+  const [recentlyUploaded, setRecentlyUploaded] = useState<string[]>([]);
   const [isSyncing, setIsSyncing] = useState(false);
   const [dragActive, setDragActive] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -67,28 +69,41 @@ export default function DocumentsPage() {
 
     setIsUploading(true);
     setUploadProgress(0);
+    setUploadingFiles(docxFiles.map(f => f.name));
 
     const formData = new FormData();
     docxFiles.forEach(file => formData.append("files", file));
 
-    try {
-      const res = await fetch("http://localhost:8000/api/v1/upload", {
-        method: "POST",
-        body: formData,
-      });
+    const xhr = new XMLHttpRequest();
+    
+    xhr.upload.addEventListener("progress", (e) => {
+      if (e.lengthComputable) {
+        const percent = Math.round((e.loaded / e.total) * 100);
+        setUploadProgress(percent);
+      }
+    });
 
-      if (res.ok) {
+    xhr.addEventListener("load", async () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        setRecentlyUploaded(docxFiles.map(f => f.name));
         await fetchDocuments();
+        // Clear recent highlight after 5 seconds
+        setTimeout(() => setRecentlyUploaded([]), 5000);
       } else {
         alert("Upload failed.");
       }
-    } catch (error) {
-      console.error("Upload error:", error);
-      alert("An error occurred during upload.");
-    } finally {
       setIsUploading(false);
-      setUploadProgress(100);
-    }
+      setUploadingFiles([]);
+    });
+
+    xhr.addEventListener("error", () => {
+      alert("An error occurred during upload.");
+      setIsUploading(false);
+      setUploadingFiles([]);
+    });
+
+    xhr.open("POST", "http://localhost:8000/api/v1/upload");
+    xhr.send(formData);
   };
 
   const handleDelete = async (filename: string) => {
@@ -246,11 +261,29 @@ export default function DocumentsPage() {
               <p className="text-[var(--text-muted)] text-sm">Only Thai legal documents in .docx format</p>
               
               {isUploading && (
-                <div className="absolute inset-0 bg-white/80 backdrop-blur-sm rounded-3xl flex flex-col items-center justify-center p-8">
-                  <div className="w-full max-w-xs h-2 bg-gray-100 rounded-full overflow-hidden mb-3">
-                    <div className="h-full bg-blue-600 transition-all duration-300" style={{ width: `${uploadProgress}%` }}></div>
+                <div className="absolute inset-0 bg-white/90 backdrop-blur-md rounded-3xl flex flex-col items-center justify-center p-8 z-20">
+                  <div className="w-full max-w-sm">
+                    <div className="flex justify-between items-center mb-3">
+                      <span className="text-xs font-bold text-blue-600 uppercase tracking-tighter">Uploading {uploadingFiles.length} file{uploadingFiles.length > 1 ? 's' : ''}</span>
+                      <span className="text-sm font-black text-blue-700">{uploadProgress}%</span>
+                    </div>
+                    <div className="w-full h-3 bg-blue-100/50 rounded-full overflow-hidden mb-6 border border-blue-100 shadow-inner">
+                      <div 
+                        className="h-full bg-gradient-to-r from-blue-500 to-indigo-600 transition-all duration-300 ease-out shadow-[0_0_10px_rgba(37,99,235,0.4)]" 
+                        style={{ width: `${uploadProgress}%` }}
+                      ></div>
+                    </div>
+                    <div className="space-y-2 max-h-32 overflow-y-auto pr-2 custom-scrollbar">
+                      {uploadingFiles.map((name, i) => (
+                        <div key={i} className="flex items-center gap-2 text-xs font-medium text-gray-600 bg-white/50 p-2 rounded-lg border border-white/80 shrink-0 animate-in fade-in slide-in-from-bottom-1">
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" className="text-blue-500">
+                            <path d="M20 6L9 17l-5-5"></path>
+                          </svg>
+                          <span className="truncate">{name}</span>
+                        </div>
+                      ))}
+                    </div>
                   </div>
-                  <p className="font-semibold text-blue-700 animate-pulse">Uploading documents...</p>
                 </div>
               )}
             </div>
@@ -279,7 +312,7 @@ export default function DocumentsPage() {
               ) : (
                 <div className="divide-y divide-[var(--border-color)]">
                   {documents.map((doc, idx) => (
-                    <div key={idx} className="flex items-center justify-between p-4 hover:bg-gray-50/50 transition-colors group">
+                    <div key={idx} className={`flex items-center justify-between p-4 hover:bg-gray-50/50 transition-all group border-l-4 ${recentlyUploaded.includes(doc.name) ? 'border-l-emerald-500 bg-emerald-50/30' : 'border-l-transparent'}`}>
                       <div className="flex items-center gap-4 min-w-0">
                         <div className="w-10 h-10 rounded-lg bg-blue-50 flex items-center justify-center text-blue-600 shrink-0">
                           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">

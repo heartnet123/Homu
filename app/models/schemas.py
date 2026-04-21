@@ -6,6 +6,7 @@ from pydantic import BaseModel
 class LegalQueryRequest(BaseModel):
     query: str
     thread_id: Optional[str] = None
+    model: Optional[str] = None
 
 
 class LegalQueryResponse(BaseModel):

@@ -21,7 +21,7 @@ def create_nodes(embedding_service, llm_service):
 
     async def analyze_node(state: LegalRAGState) -> dict:
         context = "\n\n".join(state["retrieved_docs"])
-        analysis = await llm_service.acheck_context_sufficiency(state["query"], context)
+        analysis = await llm_service.acheck_context_sufficiency(state["query"], context, model_name=state.get("model"))
         return {
             "analysis": analysis,
             "needs_clarification": analysis.startswith("NEEDS_CLARIFICATION"),
@@ -29,7 +29,7 @@ def create_nodes(embedding_service, llm_service):
 
     async def generate_node(state: LegalRAGState) -> dict:
         context = "\n\n".join(state["retrieved_docs"])
-        answer = await llm_service.agenerate_answer(state["query"], context)
+        answer = await llm_service.agenerate_answer(state["query"], context, model_name=state.get("model"))
         return {
             "answer": answer,
             "sources": state["retrieved_docs"],

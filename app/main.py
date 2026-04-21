@@ -72,6 +72,7 @@ async def ask_question(
             "sources": [],
             "iteration": 0,
             "needs_clarification": False,
+            "model": request.model,
         }
 
         result = legal_rag_graph.invoke(initial_state)
@@ -117,6 +118,7 @@ async def ask_question_stream(
             "sources": [],
             "iteration": 0,
             "needs_clarification": False,
+            "model": request.model,
         }
 
         async def generate():

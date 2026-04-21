@@ -19,4 +19,5 @@ class LegalRAGState(TypedDict):
     sources: List[str]
     iteration: int
     needs_clarification: bool
+    model: Optional[str]
 
