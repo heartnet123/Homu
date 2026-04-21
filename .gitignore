@@ -6,6 +6,8 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 chroma_database/
+tests/
+*.docx
 
 frontend/.next/
 frontend/node_modules/
