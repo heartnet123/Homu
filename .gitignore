@@ -12,6 +12,6 @@ main2.py
 PHASE3_README.md
 PHASE4_README.md
 *.db
-
+*.agents
 frontend/.next/
 frontend/node_modules/

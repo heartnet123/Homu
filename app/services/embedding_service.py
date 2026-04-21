@@ -1,7 +1,9 @@
+import chromadb
+from chromadb import Documents, EmbeddingFunction, Embeddings
 from app.config import settings
 
 
-class ThaiLegalEmbeddingFunction:
+class ThaiLegalEmbeddingFunction(EmbeddingFunction[Documents]):
     """Custom embedding function for ChromaDB."""
 
     def __init__(self, model_name: str):
@@ -9,9 +11,32 @@ class ThaiLegalEmbeddingFunction:
 
         self.model = SentenceTransformer(model_name)
 
-    def __call__(self, input: list[str]) -> list[list[float]]:
-        embeddings = self.model.encode(input, show_progress_bar=False)
-        return embeddings.tolist()
+    def __call__(self, input: Documents) -> Embeddings:
+        # Debugging
+        print(f"DEBUG: Embedding input type: {type(input)}, len: {len(input)}")
+        if len(input) > 0:
+            print(f"DEBUG: First item type: {type(input[0])}")
+
+        # Flatten if ChromaDB passes nested lists
+        texts = []
+        for item in input:
+            if isinstance(item, list):
+                texts.extend(item)
+            else:
+                texts.append(item)
+                
+        print(f"DEBUG: Flattened texts len: {len(texts)}")
+        embeddings = self.model.encode(texts, show_progress_bar=False)
+        print(f"DEBUG: Embeddings type: {type(embeddings)}, shape: {getattr(embeddings, 'shape', 'N/A')}")
+        
+        result = embeddings.tolist()
+        print(f"DEBUG: Result type: {type(result)}, len: {len(result)}")
+        if len(result) > 0:
+            print(f"DEBUG: First result element type: {type(result[0])}")
+            if isinstance(result[0], list) and len(result[0]) > 0:
+                print(f"DEBUG: First vector first element type: {type(result[0][0])}")
+        
+        return result
 
     def embed_documents(self, documents: list[str]) -> list[list[float]]:
         return self.__call__(documents)
@@ -29,8 +54,6 @@ class ThaiLegalEmbeddingFunction:
 
 class EmbeddingService:
     def __init__(self):
-        import chromadb
-
         self.client = chromadb.PersistentClient(path=settings.CHROMA_DB_DIR)
         self.embedding_fn = ThaiLegalEmbeddingFunction(settings.EMBED_MODEL_NAME)
         self.collection = self.client.get_or_create_collection(
