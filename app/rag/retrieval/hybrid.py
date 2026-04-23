@@ -5,6 +5,7 @@ from app.core.settings import settings
 from app.domain.models import SearchResult, SourceItem
 
 
+
 class _OptionalReranker:
     def __init__(self):
         self._model = None

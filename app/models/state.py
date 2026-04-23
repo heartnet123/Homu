@@ -1,6 +1,6 @@
 from typing import Annotated, Any, TypedDict
 
-from app.domain.models import ClarificationResult, SourceItem
+from app.domain.models import ClarificationResult, GroundedAnswer, SourceItem
 
 try:
     from langchain_core.messages import BaseMessage
@@ -19,6 +19,8 @@ class LegalRAGState(TypedDict):
     retrieved_docs: list[str]
     source_items: list[SourceItem]
     sources: list[str]
+    evidence_items: list[SourceItem]
+    answer_metadata: GroundedAnswer | None
     analysis: str | None
     clarification_result: ClarificationResult | None
     answer: str | None

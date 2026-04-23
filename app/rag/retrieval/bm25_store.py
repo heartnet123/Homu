@@ -76,8 +76,24 @@ class BM25Index:
                 article=chunk.article,
                 score=float(score),
                 retrieval_method="bm25",
+                citation=self._format_citation(chunk),
+                chunk_index=int(chunk.metadata.get("chunk_index", 0)),
                 metadata=chunk.metadata,
             )
             for chunk, score in ranked[:n_results]
             if score > 0
         ]
+
+    @staticmethod
+    def _format_citation(chunk: DocumentChunk) -> str | None:
+        parts: list[str] = []
+        if chunk.document:
+            parts.append(str(chunk.document))
+        if chunk.chapter:
+            parts.append(f"บท {chunk.chapter}")
+        if chunk.article:
+            parts.append(f"มาตรา {chunk.article}")
+        chunk_index = chunk.metadata.get("chunk_index")
+        if chunk_index is not None:
+            parts.append(f"chunk {chunk_index}")
+        return " | ".join(parts) or None

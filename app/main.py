@@ -17,7 +17,7 @@ from app.dependencies import get_knowledge_base_service
 async def lifespan(app: FastAPI):
     init_db()
     if settings.AUTO_INIT_COLLECTION:
-        loaded_chunks = get_knowledge_base_service().sync(force=True)
+        loaded_chunks = get_knowledge_base_service().sync(force=False)
         app.state.loaded_chunks = loaded_chunks
     yield
 

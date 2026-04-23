@@ -1,14 +1,29 @@
 import asyncio
 import importlib
+import json
 import os
+import shutil
 import sqlite3
 import sys
-import tempfile
 import unittest
+import uuid
+from contextlib import contextmanager
 from pathlib import Path
 from types import ModuleType
 
 from fastapi.testclient import TestClient
+
+from app.core.errors import BadRequestError
+
+
+@contextmanager
+def workspace_tempdir():
+    path = Path(".test-tmp") / uuid.uuid4().hex
+    path.mkdir(parents=True, exist_ok=False)
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
 
 
 def install_fake_message_modules() -> None:
@@ -111,8 +126,8 @@ class DocumentLoaderTests(unittest.TestCase):
         )()
         sys.modules["docx"] = docx_module
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            doc_path = Path(tmpdir) / "พรบ.เเรงงาน.docx"
+        with workspace_tempdir() as tmpdir:
+            doc_path = tmpdir / "พรบ.เเรงงาน.docx"
             doc_path.touch()
 
             module = importlib.import_module("app.infrastructure.document_loader")
@@ -127,6 +142,346 @@ class DocumentLoaderTests(unittest.TestCase):
             "[พรบ.เเรงงาน] [หมวด 1 บททั่วไป] [มาตรา 5] ลูกจ้างมีสิทธิได้รับค่าจ้าง",
         )
         self.assertTrue(chunks[2].metadata["source_path"].endswith(".docx"))
+        self.assertIn("source_hash", chunks[2].metadata)
+        self.assertIn("source_mtime", chunks[2].metadata)
+        self.assertEqual(chunks[2].metadata["embedding_model"], module.settings.EMBED_MODEL_NAME)
+        self.assertEqual(chunks[2].metadata["pipeline_version"], module.settings.VECTOR_PIPELINE_VERSION)
+        self.assertEqual(chunks[2].metadata["chunk_index"], 2)
+
+
+class KnowledgeBaseServiceTests(unittest.TestCase):
+    def _make_document(self, tmpdir, relative_path, *, file_hash, file_mtime, collection_id="default"):
+        from app.infrastructure.document_loader import DiscoveredDocument
+
+        path = Path(tmpdir) / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch()
+        return DiscoveredDocument(
+            path=path,
+            relative_path=Path(relative_path).as_posix(),
+            collection_id=collection_id,
+            document_name=Path(relative_path).stem,
+            file_mtime=file_mtime,
+            file_hash=file_hash,
+        )
+
+    def _make_chunk(self, chunk_id, text, *, document, source_path, collection_id="default"):
+        from app.domain.models import DocumentChunk
+        from app.core.settings import settings
+
+        return DocumentChunk(
+            id=chunk_id,
+            text=text,
+            document=document,
+            collection_id=collection_id,
+            metadata={
+                "document": document,
+                "collection_id": collection_id,
+                "chapter": "",
+                "article": "",
+                "source_path": source_path,
+                "source_mtime": 1.0,
+                "source_hash": f"hash-{chunk_id}",
+                "embedding_model": settings.EMBED_MODEL_NAME,
+                "pipeline_version": settings.VECTOR_PIPELINE_VERSION,
+                "chunk_index": 0,
+            },
+        )
+
+    def _make_loader(self, documents, chunks_by_source):
+        class FakeLoader:
+            def __init__(self, docs, source_chunks):
+                self.documents = list(docs)
+                self.chunks_by_source = {key: list(value) for key, value in source_chunks.items()}
+                self.load_documents_calls = []
+
+            def discover_documents(self):
+                return list(self.documents)
+
+            def load_documents(self, documents=None):
+                docs = list(documents or self.documents)
+                self.load_documents_calls.append([doc.relative_path for doc in docs])
+                return {
+                    doc.relative_path: list(self.chunks_by_source.get(doc.relative_path, []))
+                    for doc in docs
+                }
+
+            def load(self):
+                chunks = []
+                for source_chunks in self.load_documents().values():
+                    chunks.extend(source_chunks)
+                return chunks
+
+        return FakeLoader(documents, chunks_by_source)
+
+    def _make_vector_store(self, initial_chunks=None):
+        class FakeVectorStore:
+            def __init__(self, starting_chunks):
+                self.chunks = {chunk.id: chunk for chunk in (starting_chunks or [])}
+                self.rebuild_calls = 0
+                self.upsert_calls = []
+                self.deleted_calls = []
+
+            def rebuild(self, chunks):
+                self.rebuild_calls += 1
+                self.chunks = {chunk.id: chunk for chunk in chunks}
+
+            def upsert_chunks(self, chunks):
+                self.upsert_calls.append([chunk.id for chunk in chunks])
+                for chunk in chunks:
+                    self.chunks[chunk.id] = chunk
+                return len(chunks)
+
+            def delete_chunks(self, chunk_ids):
+                self.deleted_calls.append(list(chunk_ids))
+                for chunk_id in chunk_ids:
+                    self.chunks.pop(chunk_id, None)
+                return len(chunk_ids)
+
+            def count(self):
+                return len(self.chunks)
+
+        return FakeVectorStore(initial_chunks)
+
+    def _make_bm25(self):
+        class FakeBM25Index:
+            def __init__(self):
+                self.rebuild_calls = 0
+                self.last_chunks = []
+
+            def rebuild(self, chunks):
+                self.rebuild_calls += 1
+                self.last_chunks = list(chunks)
+
+        return FakeBM25Index()
+
+    def test_incremental_sync_adds_only_new_chunks(self):
+        from app.application.services.documents import KnowledgeBaseService
+
+        with workspace_tempdir() as tmpdir:
+            doc_a = self._make_document(tmpdir, "a.docx", file_hash="hash-a", file_mtime=1.0)
+            chunk_a = self._make_chunk("chunk-a", "A", document="a", source_path="a.docx")
+            loader = self._make_loader([doc_a], {"a.docx": [chunk_a]})
+            vector_store = self._make_vector_store()
+            bm25_index = self._make_bm25()
+            service = KnowledgeBaseService(
+                loader,
+                vector_store,
+                bm25_index,
+                manifest_path=Path(tmpdir) / "manifest.json",
+            )
+
+            self.assertEqual(service.sync(), 1)
+
+            doc_b = self._make_document(tmpdir, "b.docx", file_hash="hash-b", file_mtime=2.0)
+            chunk_b = self._make_chunk("chunk-b", "B", document="b", source_path="b.docx")
+            loader.documents = [doc_a, doc_b]
+            loader.chunks_by_source["b.docx"] = [chunk_b]
+
+            self.assertEqual(service.sync(), 2)
+
+        self.assertEqual(vector_store.rebuild_calls, 1)
+        self.assertEqual(vector_store.upsert_calls[-1], ["chunk-b"])
+        self.assertEqual(bm25_index.last_chunks[-1].id, "chunk-b")
+
+    def test_incremental_sync_replaces_changed_document_chunks(self):
+        from app.application.services.documents import KnowledgeBaseService
+
+        with workspace_tempdir() as tmpdir:
+            doc_v1 = self._make_document(tmpdir, "labor.docx", file_hash="hash-v1", file_mtime=1.0)
+            old_chunk = self._make_chunk("chunk-old", "old text", document="labor", source_path="labor.docx")
+            loader = self._make_loader([doc_v1], {"labor.docx": [old_chunk]})
+            vector_store = self._make_vector_store()
+            bm25_index = self._make_bm25()
+            service = KnowledgeBaseService(
+                loader,
+                vector_store,
+                bm25_index,
+                manifest_path=Path(tmpdir) / "manifest.json",
+            )
+            service.sync()
+
+            doc_v2 = self._make_document(tmpdir, "labor.docx", file_hash="hash-v2", file_mtime=2.0)
+            new_chunk = self._make_chunk("chunk-new", "new text", document="labor", source_path="labor.docx")
+            loader.documents = [doc_v2]
+            loader.chunks_by_source["labor.docx"] = [new_chunk]
+
+            self.assertEqual(service.sync(), 1)
+
+        self.assertIn("chunk-old", vector_store.deleted_calls[-1])
+        self.assertEqual(vector_store.upsert_calls[-1], ["chunk-new"])
+        self.assertEqual([chunk.id for chunk in bm25_index.last_chunks], ["chunk-new"])
+
+    def test_incremental_sync_removes_deleted_documents(self):
+        from app.application.services.documents import KnowledgeBaseService
+
+        with workspace_tempdir() as tmpdir:
+            doc_a = self._make_document(tmpdir, "a.docx", file_hash="hash-a", file_mtime=1.0)
+            doc_b = self._make_document(tmpdir, "b.docx", file_hash="hash-b", file_mtime=2.0)
+            chunk_a = self._make_chunk("chunk-a", "A", document="a", source_path="a.docx")
+            chunk_b = self._make_chunk("chunk-b", "B", document="b", source_path="b.docx")
+            loader = self._make_loader([doc_a, doc_b], {"a.docx": [chunk_a], "b.docx": [chunk_b]})
+            vector_store = self._make_vector_store()
+            bm25_index = self._make_bm25()
+            service = KnowledgeBaseService(
+                loader,
+                vector_store,
+                bm25_index,
+                manifest_path=Path(tmpdir) / "manifest.json",
+            )
+            service.sync()
+
+            loader.documents = [doc_a]
+            loader.chunks_by_source.pop("b.docx")
+
+            self.assertEqual(service.sync(), 1)
+
+        self.assertIn("chunk-b", vector_store.deleted_calls[-1])
+        self.assertEqual([chunk.id for chunk in bm25_index.last_chunks], ["chunk-a"])
+
+    def test_incremental_sync_is_noop_when_documents_are_unchanged(self):
+        from app.application.services.documents import KnowledgeBaseService
+
+        with workspace_tempdir() as tmpdir:
+            doc_a = self._make_document(tmpdir, "a.docx", file_hash="hash-a", file_mtime=1.0)
+            chunk_a = self._make_chunk("chunk-a", "A", document="a", source_path="a.docx")
+            loader = self._make_loader([doc_a], {"a.docx": [chunk_a]})
+            vector_store = self._make_vector_store()
+            bm25_index = self._make_bm25()
+            service = KnowledgeBaseService(
+                loader,
+                vector_store,
+                bm25_index,
+                manifest_path=Path(tmpdir) / "manifest.json",
+            )
+            service.sync()
+            vector_store.upsert_calls.clear()
+            vector_store.deleted_calls.clear()
+
+            self.assertEqual(service.sync(), 1)
+
+        self.assertEqual(vector_store.upsert_calls[-1:], [])
+        self.assertEqual(vector_store.deleted_calls[-1:], [[]])
+        self.assertEqual([chunk.id for chunk in bm25_index.last_chunks], ["chunk-a"])
+
+    def test_manifest_model_mismatch_forces_full_rebuild(self):
+        from app.application.services.documents import KnowledgeBaseService
+
+        with workspace_tempdir() as tmpdir:
+            manifest_path = tmpdir / "manifest.json"
+            doc_a = self._make_document(tmpdir, "a.docx", file_hash="hash-a", file_mtime=1.0)
+            chunk_a = self._make_chunk("chunk-a", "A", document="a", source_path="a.docx")
+            loader = self._make_loader([doc_a], {"a.docx": [chunk_a]})
+            vector_store = self._make_vector_store()
+            bm25_index = self._make_bm25()
+            service = KnowledgeBaseService(loader, vector_store, bm25_index, manifest_path=manifest_path)
+            service.sync()
+
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["embedding_model"] = "different-model"
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+            reloaded_service = KnowledgeBaseService(loader, vector_store, bm25_index, manifest_path=manifest_path)
+            self.assertEqual(reloaded_service.sync(), 1)
+
+        self.assertEqual(vector_store.rebuild_calls, 2)
+
+
+class ChromaVectorStoreTests(unittest.TestCase):
+    def _make_chunk(self, chunk_id, text):
+        from app.domain.models import DocumentChunk
+
+        return DocumentChunk(
+            id=chunk_id,
+            text=text,
+            document="labor",
+            collection_id="default",
+            article="มาตรา ๓๒",
+            metadata={"source_path": "labor.docx", "chunk_index": 0},
+        )
+
+    def test_rebuild_clears_existing_ids_without_recreating_collection(self):
+        from app.infrastructure.vectorstores.chroma_store import ChromaVectorStore
+
+        class FakeClient:
+            def delete_collection(self, name):
+                raise AssertionError(f"rebuild should not delete collection {name}")
+
+        class FakeCollection:
+            def __init__(self):
+                self.ids = ["old-1", "old-2"]
+                self.deleted_ids = []
+                self.upserted_ids = []
+
+            def get(self, include=None):
+                return {"ids": list(self.ids)}
+
+            def delete(self, ids):
+                self.deleted_ids.extend(ids)
+                self.ids = [item for item in self.ids if item not in ids]
+
+            def upsert(self, *, documents, metadatas, ids):
+                self.upserted_ids.extend(ids)
+                self.ids.extend(ids)
+
+        collection = FakeCollection()
+        store = ChromaVectorStore.__new__(ChromaVectorStore)
+        store.client = FakeClient()
+        store.collection = collection
+
+        store.rebuild([self._make_chunk("new-1", "ลาป่วยได้เท่าที่ป่วยจริง")])
+
+        self.assertEqual(collection.deleted_ids, ["old-1", "old-2"])
+        self.assertEqual(collection.upserted_ids, ["new-1"])
+        self.assertEqual(collection.ids, ["new-1"])
+
+    def test_embedding_function_wraps_single_query_vector_for_chroma(self):
+        from app.infrastructure.vectorstores.chroma_store import ThaiLegalEmbeddingFunction
+
+        class FakeModel:
+            def encode(self, texts, show_progress_bar=False):
+                self.texts = texts
+                return [0.1, 0.2, 0.3]
+
+        embedding = ThaiLegalEmbeddingFunction.__new__(ThaiLegalEmbeddingFunction)
+        embedding.model = FakeModel()
+
+        vectors = [list(vector) for vector in embedding(["ลาป่วยได้กี่วัน"])]
+        self.assertEqual(vectors, [[0.1, 0.2, 0.3]])
+
+    def test_search_sends_explicit_query_embedding_matrix(self):
+        from app.infrastructure.vectorstores.chroma_store import ChromaVectorStore
+
+        class FakeEmbedding:
+            def __call__(self, input):
+                return [[0.1, 0.2, 0.3]]
+
+        class FakeCollection:
+            def __init__(self):
+                self.query_kwargs = None
+
+            def count(self):
+                return 1
+
+            def query(self, **kwargs):
+                self.query_kwargs = kwargs
+                return {
+                    "documents": [["มาตรา ๓๒ ให้ลูกจ้างมีสิทธิลาป่วยได้เท่าที่ป่วยจริง"]],
+                    "metadatas": [[{"document": "labor", "collection_id": "default", "article": "มาตรา ๓๒"}]],
+                    "ids": [["chunk-32"]],
+                    "distances": [[0.25]],
+                }
+
+        collection = FakeCollection()
+        store = ChromaVectorStore.__new__(ChromaVectorStore)
+        store.collection = collection
+        store.embedding_fn = FakeEmbedding()
+
+        results = store.search("ลาป่วยได้กี่วัน", n_results=1)
+
+        self.assertNotIn("query_texts", collection.query_kwargs)
+        self.assertEqual(collection.query_kwargs["query_embeddings"], [[0.1, 0.2, 0.3]])
+        self.assertEqual(results[0].chunk_id, "chunk-32")
 
 
 class GraphBuilderTests(unittest.TestCase):
@@ -233,8 +588,8 @@ class ThreadRepositoryTests(unittest.TestCase):
         from app.domain.models import SourceItem
         from app.infrastructure.repositories.thread_repository import SQLiteThreadRepository
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            db_path = Path(tmpdir) / "threads.db"
+        with workspace_tempdir() as tmpdir:
+            db_path = tmpdir / "threads.db"
             repo = SQLiteThreadRepository(db_path)
             repo.init_db()
 
@@ -259,6 +614,54 @@ class ThreadRepositoryTests(unittest.TestCase):
         self.assertEqual(messages[0].sources, ["legacy-source"])
         self.assertEqual(messages[0].source_items[0].chunk_id, "chunk-1")
         self.assertIn("+00:00", messages[0].created_at)
+
+    def test_init_db_migrates_existing_messages_table_without_source_items(self):
+        from app.infrastructure.repositories.thread_repository import SQLiteThreadRepository
+
+        with workspace_tempdir() as tmpdir:
+            db_path = tmpdir / "threads.db"
+            conn = sqlite3.connect(db_path)
+            conn.execute(
+                """
+                CREATE TABLE threads (
+                    id TEXT PRIMARY KEY,
+                    title TEXT,
+                    created_at TEXT,
+                    updated_at TEXT
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    thread_id TEXT,
+                    role TEXT,
+                    content TEXT,
+                    sources TEXT,
+                    needs_clarification BOOLEAN,
+                    created_at TEXT,
+                    FOREIGN KEY (thread_id) REFERENCES threads (id)
+                )
+                """
+            )
+            conn.commit()
+            conn.close()
+
+            repo = SQLiteThreadRepository(db_path)
+            repo.init_db()
+
+            migrated_conn = sqlite3.connect(db_path)
+            columns = [row[1] for row in migrated_conn.execute("PRAGMA table_info(messages)").fetchall()]
+            migrated_conn.close()
+
+            self.assertIn("source_items", columns)
+
+            thread_id = repo.create_thread("ทดสอบ")
+            repo.add_message(thread_id, "user", "คำถาม")
+            messages = repo.get_thread_messages(thread_id)
+
+        self.assertEqual(messages[0].source_items, [])
 
 
 class HybridRetrieverTests(unittest.TestCase):
@@ -512,6 +915,34 @@ class FastAPITests(unittest.TestCase):
         self.assertEqual(ingest_response.json()["chunks"], 7)
         self.assertEqual(delete_response.json()["message"], "Deleted law.docx")
         self.assertEqual(capabilities_response.json()["search_strategies"], ["vector", "bm25", "hybrid"])
+
+    def test_streaming_returns_public_app_error_message(self):
+        main_module = importlib.import_module("app.main")
+        dependencies_module = importlib.import_module("app.dependencies")
+        client = TestClient(main_module.app)
+
+        class ExplodingGraph:
+            async def astream_events(self, *_args, **_kwargs):
+                raise BadRequestError("Model 'claude-3-sonnet-20240229' is not supported by this backend.")
+                yield
+
+        class FakeStreamUseCase:
+            def __init__(self):
+                self.graph = ExplodingGraph()
+
+            async def start(self, request):
+                return "thread-1", {"query": request.query}
+
+        main_module.app.dependency_overrides[dependencies_module.get_stream_answer_use_case] = lambda: FakeStreamUseCase()
+
+        with client.stream("POST", "/api/v1/ask/stream", json={"query": "hello"}) as response:
+            chunks = list(response.iter_text())
+
+        main_module.app.dependency_overrides.clear()
+
+        stream_text = "".join(chunks)
+        self.assertIn("is not supported by this backend", stream_text)
+        self.assertNotIn("Streaming failed.", stream_text)
 
 
 if __name__ == "__main__":

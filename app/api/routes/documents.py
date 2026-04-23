@@ -1,6 +1,6 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, Form, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
 
 from app.dependencies import get_document_service, get_knowledge_base_service
 
@@ -29,6 +29,9 @@ async def delete_document(filename: str, document_service=Depends(get_document_s
 
 
 @router.post("/ingest")
-async def ingest_documents(knowledge_base_service=Depends(get_knowledge_base_service)):
-    chunks = knowledge_base_service.sync(force=True)
+async def ingest_documents(
+    force: bool = Query(default=False),
+    knowledge_base_service=Depends(get_knowledge_base_service),
+):
+    chunks = knowledge_base_service.sync(force=force)
     return {"message": "Knowledge base synchronized successfully", "chunks": chunks}

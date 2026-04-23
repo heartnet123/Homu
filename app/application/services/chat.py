@@ -1,7 +1,8 @@
 from typing import Any
 
+from app.core.logging import logger
 from app.core.settings import settings
-from app.domain.models import ClarificationResult, SourceItem
+from app.domain.models import ClarificationResult, GroundedAnswer, SourceItem
 from app.models.schemas import LegalQueryRequest, LegalQueryResponse
 
 
@@ -27,26 +28,56 @@ class LegalAssistantWorkflowService:
     def to_legacy_sources(source_items: list[SourceItem]) -> list[str]:
         return [item.as_legacy_text() for item in source_items]
 
-    async def retrieve(self, state: dict[str, Any]) -> dict[str, Any]:
-        self.knowledge_base_service.ensure_ready()
-        search_result = await self.retriever.search(
-            state["query"],
-            collection_id=state.get("collection_id"),
-            strategy=state.get("search_strategy"),
-            n_results=settings.TOP_K_RESULTS,
-            confidence_threshold=state.get("confidence_threshold") or settings.DEFAULT_CONFIDENCE_THRESHOLD,
+    @staticmethod
+    def _build_evidence_items(source_items: list[SourceItem]) -> list[SourceItem]:
+        return sorted(source_items, key=lambda item: item.score or 0.0, reverse=True)
+
+    @staticmethod
+    def _build_prompt_context(evidence_items: list[SourceItem]) -> str:
+        lines: list[str] = []
+        for idx, item in enumerate(evidence_items, start=1):
+            lines.append(
+                f"[{idx}] citation={item.citation or item.as_legacy_text()} | score={item.score or 0.0:.4f}\n"
+                f"{item.text}"
+            )
+        return "\n\n".join(lines)
+
+    @staticmethod
+    def _build_answer_metadata(answer: str, evidence_items: list[SourceItem], confidence: float | None) -> GroundedAnswer:
+        citations = [item.citation or item.as_legacy_text() for item in evidence_items if (item.citation or item.as_legacy_text())]
+        return GroundedAnswer(
+            answer=answer,
+            citations=citations,
+            used_chunk_ids=[item.chunk_id for item in evidence_items],
+            confidence=confidence,
         )
+
+    async def retrieve(self, state: dict[str, Any]) -> dict[str, Any]:
+        try:
+            self.knowledge_base_service.ensure_ready()
+            search_result = await self.retriever.search(
+                state["query"],
+                collection_id=state.get("collection_id"),
+                strategy=state.get("search_strategy"),
+                n_results=settings.TOP_K_RESULTS,
+                confidence_threshold=state.get("confidence_threshold") or settings.DEFAULT_CONFIDENCE_THRESHOLD,
+            )
+        except Exception:
+            logger.exception("Retrieval stage failed", extra={"query": state.get("query")})
+            raise
+        evidence_items = self._build_evidence_items(search_result.sources)
         return {
-            "retrieved_docs": [source.text for source in search_result.sources],
-            "source_items": search_result.sources,
-            "sources": self.to_legacy_sources(search_result.sources),
+            "retrieved_docs": [source.text for source in evidence_items],
+            "source_items": evidence_items,
+            "evidence_items": evidence_items,
+            "sources": self.to_legacy_sources(evidence_items),
             "retrieval_confidence": search_result.confidence,
             "expanded_to_all_collections": search_result.expanded_to_all_collections,
             "iteration": state.get("iteration", 0) + 1,
         }
 
     async def analyze(self, state: dict[str, Any]) -> dict[str, Any]:
-        context = "\n\n".join(state.get("retrieved_docs", []))
+        context = self._build_prompt_context(state.get("evidence_items", []))
         analysis = await self.llm_service.analyze_context(
             state["query"],
             context,
@@ -59,14 +90,17 @@ class LegalAssistantWorkflowService:
         }
 
     async def generate(self, state: dict[str, Any]) -> dict[str, Any]:
-        context = "\n\n".join(state.get("retrieved_docs", []))
+        evidence_items = state.get("evidence_items", [])
+        context = self._build_prompt_context(evidence_items)
         answer = await self.llm_service.generate_answer(
             state["query"],
             context,
             model_name=state.get("model"),
         )
+        answer_metadata = self._build_answer_metadata(answer, evidence_items, state.get("retrieval_confidence"))
         return {
             "answer": answer,
+            "answer_metadata": answer_metadata,
             "messages": [_create_ai_message(answer)],
         }
 
@@ -91,10 +125,12 @@ def build_initial_state(request: LegalQueryRequest, thread_id: str) -> dict[str,
         "thread_id": thread_id,
         "retrieved_docs": [],
         "source_items": [],
+        "evidence_items": [],
         "sources": [],
         "analysis": None,
         "clarification_result": None,
         "answer": None,
+        "answer_metadata": None,
         "iteration": 0,
         "needs_clarification": False,
         "model": request.model,
@@ -108,10 +144,14 @@ def build_initial_state(request: LegalQueryRequest, thread_id: str) -> dict[str,
 
 def build_response_from_result(result: dict[str, Any], thread_id: str) -> LegalQueryResponse:
     source_items = result.get("source_items", [])
+    answer_metadata = result.get("answer_metadata")
+    citations = answer_metadata.citations if isinstance(answer_metadata, GroundedAnswer) else []
     return LegalQueryResponse(
         answer=result.get("answer") or "",
         sources=result.get("sources", []),
         source_items=source_items,
+        citations=citations,
+        answer_metadata=answer_metadata if isinstance(answer_metadata, GroundedAnswer) else None,
         analysis=result.get("analysis"),
         confidence=result.get("retrieval_confidence"),
         thread_id=thread_id,

@@ -3,6 +3,7 @@ import json
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 
+from app.core.logging import logger
 from app.dependencies import (
     get_ask_question_use_case,
     get_stream_answer_use_case,
@@ -50,8 +51,12 @@ async def ask_question_stream(
                             "expanded_to_all_collections": response.expanded_to_all_collections,
                         }
                         yield f"data: {json.dumps(metadata, ensure_ascii=False)}\n\n"
-        except Exception:
-            yield 'data: {"type": "error", "content": "Streaming failed."}\n\n'
+        except Exception as exc:
+            public_message = getattr(exc, "public_message", None)
+            error_message = public_message or str(exc) or exc.__class__.__name__
+            logger.exception("Unhandled streaming error", extra={"thread_id": thread_id, "error_message": error_message})
+            payload = {"type": "error", "content": error_message}
+            yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(generate(), media_type="text/event-stream")
 

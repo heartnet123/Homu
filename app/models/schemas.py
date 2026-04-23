@@ -2,7 +2,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from app.domain.models import SourceItem
+from app.domain.models import GroundedAnswer, SourceItem
 
 
 class LegalQueryRequest(BaseModel):
@@ -18,6 +18,8 @@ class LegalQueryResponse(BaseModel):
     answer: str
     sources: list[str] = Field(default_factory=list)
     source_items: list[SourceItem] = Field(default_factory=list)
+    citations: list[str] = Field(default_factory=list)
+    answer_metadata: GroundedAnswer | None = None
     analysis: str | None = None
     confidence: float | None = None
     thread_id: str | None = None

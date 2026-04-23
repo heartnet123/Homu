@@ -2,51 +2,95 @@
 
 import React, { useState, useRef, useEffect } from 'react';
 import Link from 'next/link';
+import { API_BASE_URL, fetchBackendCapabilities, getModelOption, getSupportedModelOptions, type ModelOption } from './lib/models';
 
-const ALL_MODELS = [
-  { id: 'gpt-5.4', name: 'GPT-5.4', company: 'OpenAI', color: 'bg-emerald-600', bgColor: 'bg-emerald-50', textColor: 'text-emerald-800', borderColor: 'border-emerald-200' },
-  { id: 'gpt-5.4-mini', name: 'GPT-5.4 Mini', company: 'OpenAI', color: 'bg-emerald-400', bgColor: 'bg-emerald-50', textColor: 'text-emerald-600', borderColor: 'border-emerald-100' },
-  { id: 'gpt-4o', name: 'GPT-4o', company: 'OpenAI', color: 'bg-emerald-500', bgColor: 'bg-emerald-50', textColor: 'text-emerald-700', borderColor: 'border-emerald-100' },
-  { id: 'gpt-4-turbo', name: 'GPT-4 Turbo', company: 'OpenAI', color: 'bg-emerald-500', bgColor: 'bg-emerald-50', textColor: 'text-emerald-700', borderColor: 'border-emerald-100' },
-  { id: 'gpt-3.5-turbo', name: 'GPT-3.5 Turbo', company: 'OpenAI', color: 'bg-emerald-500', bgColor: 'bg-emerald-50', textColor: 'text-emerald-700', borderColor: 'border-emerald-100' },
-  { id: 'claude-3-opus-20240229', name: 'Claude 3 Opus', company: 'Anthropic', color: 'bg-purple-500', bgColor: 'bg-purple-50', textColor: 'text-purple-700', borderColor: 'border-purple-100' },
-  { id: 'claude-3-sonnet-20240229', name: 'Claude 3 Sonnet', company: 'Anthropic', color: 'bg-purple-500', bgColor: 'bg-purple-50', textColor: 'text-purple-700', borderColor: 'border-purple-100' },
-  { id: 'claude-3-haiku-20240307', name: 'Claude 3 Haiku', company: 'Anthropic', color: 'bg-purple-500', bgColor: 'bg-purple-50', textColor: 'text-purple-700', borderColor: 'border-purple-100' },
-  { id: 'gemini-1.5-pro', name: 'Gemini 1.5 Pro', company: 'Google', color: 'bg-blue-500', bgColor: 'bg-blue-50', textColor: 'text-blue-700', borderColor: 'border-blue-100' },
-  { id: 'gemini-1.5-flash', name: 'Gemini 1.5 Flash', company: 'Google', color: 'bg-blue-500', bgColor: 'bg-blue-50', textColor: 'text-blue-700', borderColor: 'border-blue-100' }
-];
+type SourceItem = {
+  chunk_id: string;
+  text: string;
+  document: string;
+  collection_id: string;
+  chapter?: string | null;
+  article?: string | null;
+  score?: number | null;
+  retrieval_method?: string | null;
+  citation?: string | null;
+  chunk_index?: number | null;
+};
+
+type Message = {
+  role: string;
+  content: string;
+  sources?: string[];
+  sourceItems?: SourceItem[];
+  citations?: string[];
+  confidence?: number | null;
+  isError?: boolean;
+  isRetryable?: boolean;
+  originalQuery?: string;
+  needsClarification?: boolean;
+};
+
+type ThreadSummary = {
+  id: string;
+  title: string;
+};
+
+type ThreadMessageResponse = {
+  role: string;
+  content: string;
+  sources?: string[];
+  source_items?: SourceItem[];
+  citations?: string[];
+  confidence?: number | null;
+  needs_clarification?: boolean;
+};
 
 export default function Home() {
-  const [selectedModel, setSelectedModel] = useState(ALL_MODELS[0]);
+  const [availableModels, setAvailableModels] = useState<ModelOption[]>([getModelOption('gpt-5.4-mini')]);
+  const [selectedModel, setSelectedModel] = useState<ModelOption>(getModelOption('gpt-5.4-mini'));
   const [isDropdownOpen, setIsDropdownOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
 
-  const loadSettings = () => {
+  const loadSettings = (models: ModelOption[], fallbackModelId?: string) => {
     const savedDefault = localStorage.getItem('defaultModel');
-    if (savedDefault) {
-      const model = ALL_MODELS.find(m => m.id === savedDefault);
-      if (model) setSelectedModel(model);
-    }
+    const preferredModelId = savedDefault || fallbackModelId || models[0]?.id;
+    if (!preferredModelId) return;
+
+    const model = models.find((item) => item.id === preferredModelId) || models[0];
+    if (model) setSelectedModel(model);
   };
 
   useEffect(() => {
-    loadSettings();
-    window.addEventListener('settingsUpdated', loadSettings);
-    return () => window.removeEventListener('settingsUpdated', loadSettings);
+    const syncModels = async () => {
+      try {
+        const capabilities = await fetchBackendCapabilities();
+        const supportedModels = getSupportedModelOptions(capabilities.models || []);
+        if (supportedModels.length === 0) return;
+
+        setAvailableModels(supportedModels);
+        loadSettings(supportedModels, capabilities.default_model);
+      } catch (error) {
+        console.error("Failed to fetch backend capabilities", error);
+      }
+    };
+
+    syncModels();
+    window.addEventListener('settingsUpdated', syncModels);
+    return () => window.removeEventListener('settingsUpdated', syncModels);
   }, []);
 
-  const [messages, setMessages] = useState<{role: string, content: string, sources?: string[], isError?: boolean, isRetryable?: boolean, originalQuery?: string, needsClarification?: boolean}[]>([]);
+  const [messages, setMessages] = useState<Message[]>([]);
   const [query, setQuery] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   
   const [currentThreadId, setCurrentThreadId] = useState<string | null>(null);
-  const [recentThreads, setRecentThreads] = useState<any[]>([]);
+  const [recentThreads, setRecentThreads] = useState<ThreadSummary[]>([]);
 
   const fetchThreads = async () => {
     try {
-      const res = await fetch("http://localhost:8000/api/v1/threads");
+      const res = await fetch(`${API_BASE_URL}/threads`);
       if (res.ok) {
-        const data = await res.json();
+        const data: ThreadSummary[] = await res.json();
         setRecentThreads(data);
       }
     } catch (e) {
@@ -56,13 +100,16 @@ export default function Home() {
 
   const loadThread = async (id: string) => {
     try {
-      const res = await fetch(`http://localhost:8000/api/v1/threads/${id}`);
+      const res = await fetch(`${API_BASE_URL}/threads/${id}`);
       if (res.ok) {
-        const data = await res.json();
-        const mappedMessages = data.map((m: any) => ({
+        const data: ThreadMessageResponse[] = await res.json();
+        const mappedMessages = data.map((m) => ({
           role: m.role,
           content: m.content,
           sources: m.sources,
+          sourceItems: m.source_items,
+          citations: m.citations,
+          confidence: m.confidence,
           needsClarification: m.needs_clarification
         }));
         setMessages(mappedMessages);
@@ -102,14 +149,16 @@ export default function Home() {
     setIsLoading(true);
 
     try {
-      const res = await fetch("http://localhost:8000/api/v1/ask/stream", {
+      const res = await fetch(`${API_BASE_URL}/ask/stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json", "Accept": "text/event-stream" },
         body: JSON.stringify({ query: queryToSend, thread_id: currentThreadId || undefined, model: selectedModel.id })
       });
       
       if (!res.ok) {
-        throw new Error(`HTTP error! status: ${res.status}`);
+        const errorPayload = await res.json().catch(() => null);
+        const detail = errorPayload?.detail || `HTTP error! status: ${res.status}`;
+        throw new Error(detail);
       }
 
       setMessages((prev) => [...prev, { role: "ai", content: "" }]);
@@ -150,11 +199,17 @@ export default function Home() {
                     setCurrentThreadId(parsed.thread_id);
                     fetchThreads();
                   }
+                  if (parsed.stage) {
+                    setIsLoading(false);
+                  }
                   setMessages((prev) => {
                     const newMessages = [...prev];
                     const lastMsg = newMessages[newMessages.length - 1];
                     if (lastMsg && lastMsg.role === 'ai') {
                       lastMsg.sources = parsed.sources;
+                      lastMsg.sourceItems = parsed.source_items;
+                      lastMsg.citations = parsed.citations;
+                      lastMsg.confidence = parsed.confidence;
                       lastMsg.needsClarification = parsed.needs_clarification;
                       if (parsed.needs_clarification && !lastMsg.content) {
                           lastMsg.content = "กรุณาให้ข้อมูลเพิ่มเติมเพื่อให้เราช่วยเหลือได้อย่างถูกต้อง";
@@ -170,7 +225,11 @@ export default function Home() {
                     const newMessages = [...prev];
                     const lastMsg = newMessages[newMessages.length - 1];
                     if (lastMsg && lastMsg.role === 'ai') {
-                      lastMsg.content += "\n[ข้อผิดพลาด: " + parsed.content + "]";
+                      const stageLabel = parsed.stage ? ` [${parsed.stage}]` : '';
+                      lastMsg.content += `\n[ข้อผิดพลาด${stageLabel}: ${parsed.content}]`;
+                      lastMsg.isError = true;
+                      lastMsg.isRetryable = parsed.retryable ?? true;
+                      lastMsg.originalQuery = queryToSend;
                     }
                     return newMessages;
                   });
@@ -186,7 +245,7 @@ export default function Home() {
       console.error(error);
       setMessages((prev) => [...prev, { 
         role: "ai", 
-        content: "เกิดข้อผิดพลาดในการเชื่อมต่อ กรุณาลองใหม่อีกครั้ง",
+        content: error instanceof Error ? error.message : "เกิดข้อผิดพลาดในการเชื่อมต่อ กรุณาลองใหม่อีกครั้ง",
         isError: true,
         isRetryable: true,
         originalQuery: queryToSend
@@ -284,7 +343,7 @@ export default function Home() {
                     Select Model
                   </div>
                   <div className="max-h-[60vh] overflow-y-auto">
-                    {ALL_MODELS.map((model) => (
+                    {availableModels.map((model) => (
                       <button
                         key={model.id}
                         onClick={() => {
@@ -358,6 +417,12 @@ export default function Home() {
                     <div className="text-[var(--text-main)] text-base leading-relaxed whitespace-pre-wrap">
                       {msg.content}
                     </div>
+                    {typeof msg.confidence === 'number' && !Number.isNaN(msg.confidence) && (
+                      <div className="mt-2 inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-slate-50 text-slate-700 text-xs font-medium border border-slate-200">
+                        <span className="w-2 h-2 rounded-full bg-slate-400"></span>
+                        Confidence {(msg.confidence * 100).toFixed(0)}%
+                      </div>
+                    )}
                     {msg.needsClarification && (
                       <div className="mt-3 inline-flex items-center gap-2 px-3 py-2 rounded-lg bg-orange-50 text-orange-700 text-sm font-medium border border-orange-100">
                         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"></circle><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
@@ -373,17 +438,40 @@ export default function Home() {
                         ลองใหม่อีกครั้ง
                       </button>
                     )}
-                    {msg.sources && msg.sources.length > 0 && (
+                    {(msg.citations && msg.citations.length > 0 || msg.sourceItems && msg.sourceItems.length > 0 || msg.sources && msg.sources.length > 0) && (
                       <details className="mt-4 bg-gray-50/50 rounded-xl border border-gray-200/80 overflow-hidden group">
                         <summary className="px-4 py-3 text-sm font-semibold text-gray-700 cursor-pointer hover:bg-gray-50 flex items-center justify-between list-none [&::-webkit-details-marker]:hidden transition-colors">
                           <span className="flex items-center gap-2.5">
                             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="text-gray-400"><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20"></path></svg>
-                            Sources ({msg.sources.length})
+                            Sources ({(msg.sourceItems?.length || msg.sources?.length || msg.citations?.length || 0)})
                           </span>
                           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="transition-transform duration-200 group-open:rotate-180 text-gray-400"><polyline points="6 9 12 15 18 9"></polyline></svg>
                         </summary>
                         <div className="px-4 pb-4 pt-1 space-y-3">
-                          {msg.sources.map((src, idx) => {
+                          {msg.sourceItems && msg.sourceItems.length > 0 ? msg.sourceItems.map((src, idx) => (
+                            <div key={src.chunk_id || idx} className="bg-white p-3.5 rounded-lg border border-gray-200 shadow-sm">
+                              <div className="flex flex-wrap gap-2 mb-2">
+                                {src.citation && (
+                                  <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-semibold bg-gray-100 text-gray-600 border border-gray-200 uppercase tracking-wider">
+                                    {src.citation}
+                                  </span>
+                                )}
+                                {typeof src.score === 'number' && (
+                                  <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-semibold bg-blue-50 text-blue-700 border border-blue-100 uppercase tracking-wider">
+                                    score {src.score.toFixed(3)}
+                                  </span>
+                                )}
+                                {src.retrieval_method && (
+                                  <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-100 uppercase tracking-wider">
+                                    {src.retrieval_method}
+                                  </span>
+                                )}
+                              </div>
+                              <div className="text-[13px] text-gray-700 leading-relaxed whitespace-pre-wrap">
+                                {src.text}
+                              </div>
+                            </div>
+                          )) : msg.sources && msg.sources.length > 0 ? msg.sources.map((src, idx) => {
                             let remaining = src.trim();
                             const tags = [];
                             while (remaining.startsWith('[')) {
@@ -411,7 +499,11 @@ export default function Home() {
                                 </div>
                               </div>
                             );
-                          })}
+                          }) : msg.citations?.map((citation, idx) => (
+                            <div key={idx} className="bg-white p-3.5 rounded-lg border border-gray-200 shadow-sm text-[13px] text-gray-700">
+                              {citation}
+                            </div>
+                          ))}
                         </div>
                       </details>
                     )}

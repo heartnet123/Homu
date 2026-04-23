@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     CHROMA_DB_DIR: str = "./chroma_database"
     COLLECTION_NAME: str = "thai_labor_law"
     DEFAULT_COLLECTION_ID: str = "default"
+    VECTOR_PIPELINE_VERSION: str = "phase1-incremental-v1"
 
     EMBED_MODEL_NAME: str = "airesearch/WangchanX-Legal-ThaiCCL-Retriever"
     ENABLE_RERANKER: bool = False

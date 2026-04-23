@@ -21,6 +21,16 @@ class SQLiteThreadRepository:
         conn.row_factory = sqlite3.Row
         return conn
 
+    @staticmethod
+    def _get_column_names(conn: sqlite3.Connection, table_name: str) -> set[str]:
+        rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+        return {row["name"] for row in rows}
+
+    def _migrate_messages_table(self, conn: sqlite3.Connection) -> None:
+        existing_columns = self._get_column_names(conn, "messages")
+        if "source_items" not in existing_columns:
+            conn.execute("ALTER TABLE messages ADD COLUMN source_items TEXT")
+
     def init_db(self) -> None:
         with closing(self._connect()) as conn:
             conn.execute(
@@ -48,6 +58,7 @@ class SQLiteThreadRepository:
                 )
                 """
             )
+            self._migrate_messages_table(conn)
             conn.commit()
 
     def create_thread(self, title: str = "New Chat") -> str:

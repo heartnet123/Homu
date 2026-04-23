@@ -22,6 +22,8 @@ class SourceItem(BaseModel):
     article: str | None = None
     score: float | None = None
     retrieval_method: str | None = None
+    citation: str | None = None
+    chunk_index: int | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     def as_legacy_text(self) -> str:
@@ -30,6 +32,8 @@ class SourceItem(BaseModel):
             tags.append(f"[Chapter: {self.chapter}]")
         if self.article:
             tags.append(f"[Article: {self.article}]")
+        if self.citation:
+            tags.append(f"[Citation: {self.citation}]")
         return " ".join(tags + [self.text])
 
 
@@ -45,6 +49,13 @@ class SearchResult(BaseModel):
     confidence: float
     sources: list[SourceItem] = Field(default_factory=list)
     expanded_to_all_collections: bool = False
+
+
+class GroundedAnswer(BaseModel):
+    answer: str
+    citations: list[str] = Field(default_factory=list)
+    used_chunk_ids: list[str] = Field(default_factory=list)
+    confidence: float | None = None
 
 
 class CollectionInfo(BaseModel):
